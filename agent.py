@@ -21,10 +21,18 @@
 #5 → (thrust=True,  rotate_left=False, rotate_right=True)     thrust + rotate right
 
 # --------------------------------
+# Libraries
 
 from lander_env import LanderEnv
 import random
 from collections import deque
+import torch
+import torch.nn as nn
+import numpy as np
+import torch.optim as optim
+
+# ---------------------------------
+# Variables
 
 buffer = deque(maxlen=100_000)
 epsilon = 1.0
@@ -32,8 +40,14 @@ epsilon_decay = 0.9995
 num_episodes = 100
 max_steps = 50
 batch_size = 10
-
 env = LanderEnv()
+
+# ---------------------------------
+# Neural Network Section
+
+
+# ---------------------------------
+# Replay Buffer and selection of batch of replay buffer
 
 for episode in range(num_episodes):
     state = env.reset()
@@ -54,4 +68,4 @@ for episode in range(num_episodes):
         if done:
             break
 
-
+# ---------------------------------
