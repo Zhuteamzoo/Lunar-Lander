@@ -1,23 +1,4 @@
-"""
-Gym-style wrapper around LanderGame for DQN training.
 
-Save your original game code as `lunar_lander.py` in the same folder as this
-file (the one containing LanderGame, Rocket, LandingPad, SCREEN_WIDTH, etc).
-This module imports from it directly rather than duplicating game logic, so
-your rendering/game code and your RL code stay separate.
-
-Usage:
-    env = LanderEnv()
-    state = env.reset()
-    for _ in range(1000):
-        action = agent.select_action(state)
-        next_state, reward, done, info = env.step(action)
-        ...
-        if done:
-            state = env.reset()
-        else:
-            state = next_state
-"""
 
 import math
 
