@@ -119,6 +119,9 @@ class DQNAgent:
 
     def remember(self, state, action, reward, next_state, done):
         self.memory.append((state, action, reward, next_state, done))
+    
+    def save(self, path: str = "dqn_weights.pth"):
+        torch.save(self.policy_net.state_dict(), path)
 
     def decay_epsilon(self):
         if self.epsilon > self.epsilon_min:
@@ -186,7 +189,9 @@ def train():
         agent.decay_epsilon()
         print(f"Episode {episode + 1:4d} | reward: {total_reward:8.2f} | "
               f"epsilon: {agent.epsilon:.3f} | steps: {steps}")
-
+    
+    agent.save()
+    print("Saved trained weights to dqn_weights.pth")
     return agent, env
 
 
