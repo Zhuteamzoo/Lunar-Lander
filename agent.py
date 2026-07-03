@@ -32,21 +32,39 @@ import torch.nn as nn
 import torch.optim as optim
 
 from lander_env import LanderEnv, STATE_SIZE, NUM_ACTIONS
+from dashboard import TrainingDashboard
 
 # ---------------------------------
 # Hyperparameters
 
 GAMMA = 0.99
-LEARNING_RATE = 1e-3          
+LEARNING_RATE = 1e-3
 EPSILON_START = 1.0
 EPSILON_MIN = 0.01
-EPSILON_DECAY = 0.9
+EPSILON_DECAY = 0.995
 BUFFER_SIZE = 100_000
-BATCH_SIZE = 64
-NUM_EPISODES = 500
-MAX_STEPS = 1000
-TARGET_UPDATE_EVERY = 500     
-TRAIN_EVERY = 1               
+BATCH_SIZE = 100
+NUM_EPISODES = 1000
+
+# Matches lander_env.py's MAX_EPISODE_STEPS (500).
+MAX_STEPS = 500
+
+TARGET_UPDATE_EVERY = 600
+
+# Was 1 (train every single step). Training every 4th step instead cuts the
+# total number of gradient updates ~4x with little loss in data efficiency,
+# since consecutive steps are highly correlated anyway -- this is the
+# single biggest lever on wall-clock training time.
+TRAIN_EVERY = 4
+
+# Successful landings are rare, so a uniformly-sampled batch mostly won't
+# contain any. This keeps a second buffer holding only transitions from
+# episodes that ended in a landing, and mixes a fixed fraction of every
+# training batch from it -- a simpler stand-in for full Prioritized
+# Experience Replay, without needing TD-error-based sampling weights.
+SUCCESS_BUFFER_SIZE = 20_000
+SUCCESS_BATCH_RATIO = 0.25   # fraction of each batch drawn from successes, once available
+SUCCESS_MIN_TO_MIX = 50      # don't start mixing until the buffer has at least this many
 
 
 # ---------------------------------
@@ -88,27 +106,21 @@ class DQNAgent:
         self.epsilon_decay = epsilon_decay
 
         self.memory = deque(maxlen=buffer_size)
+        self.success_memory = deque(maxlen=SUCCESS_BUFFER_SIZE)
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # Two networks: one we train every step, one used only to compute
-        # stable Bellman targets. Without this split, the target shifts
-        # under the network every update, which destabilizes training.
         self.policy_net = DQN(state_dim, action_dim).to(self.device)
         self.target_net = DQN(state_dim, action_dim).to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
-        self.target_net.eval()  # target net is never trained directly
+        self.target_net.eval()
 
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=learning_rate)
-        self.loss_fn = nn.SmoothL1Loss()  # Huber loss; less sensitive to reward outliers than MSE
+        self.loss_fn = nn.SmoothL1Loss()
 
         self.train_step_count = 0
 
     def act(self, state, greedy: bool = False) -> int:
-        """
-        Epsilon-greedy action selection.
-        greedy=True forces pure exploitation (used during evaluation).
-        """
         if not greedy and random.random() < self.epsilon:
             return random.randint(0, self.action_dim - 1)
 
@@ -119,7 +131,14 @@ class DQNAgent:
 
     def remember(self, state, action, reward, next_state, done):
         self.memory.append((state, action, reward, next_state, done))
-    
+
+    def remember_success(self, transitions):
+        """Called once, at the end of an episode that ended in a landing --
+        copies that episode's transitions into the dedicated success buffer
+        so they get oversampled during training."""
+        for t in transitions:
+            self.success_memory.append(t)
+
     def save(self, path: str = "dqn_weights.pth"):
         torch.save(self.policy_net.state_dict(), path)
 
@@ -129,9 +148,22 @@ class DQNAgent:
 
     def replay(self, batch_size: int = BATCH_SIZE):
         if len(self.memory) < batch_size:
-            return None  # not enough data yet
+            return None
 
-        minibatch = random.sample(self.memory, batch_size)
+        # Mix in a fixed fraction from the success buffer, once it has
+        # enough transitions to draw from. This guarantees the network
+        # sees landing outcomes regularly instead of only when a uniform
+        # sample from the (mostly failure-filled) main buffer happens to
+        # include one.
+        n_success = 0
+        if len(self.success_memory) >= SUCCESS_MIN_TO_MIX:
+            n_success = min(int(batch_size * SUCCESS_BATCH_RATIO), len(self.success_memory))
+        n_regular = batch_size - n_success
+
+        minibatch = random.sample(self.memory, n_regular)
+        if n_success > 0:
+            minibatch += random.sample(self.success_memory, n_success)
+
         states, actions, rewards, next_states, dones = zip(*minibatch)
 
         states = torch.tensor(np.array(states), dtype=torch.float32, device=self.device)
@@ -140,10 +172,8 @@ class DQNAgent:
         next_states = torch.tensor(np.array(next_states), dtype=torch.float32, device=self.device)
         dones = torch.tensor(dones, dtype=torch.float32, device=self.device).unsqueeze(1)
 
-        # Q(s, a) for the actions actually taken, from the policy network
         q_values = self.policy_net(states).gather(1, actions)
 
-        # max_a' Q_target(s', a'), from the target network, no gradient needed
         with torch.no_grad():
             next_q_values = self.target_net(next_states).max(dim=1, keepdim=True)[0]
             targets = rewards + self.gamma * next_q_values * (1.0 - dones)
@@ -160,6 +190,11 @@ class DQNAgent:
 
         return loss.item()
 
+    def load(self, path: str = "dqn_weights.pth"):
+        state_dict = torch.load(path, map_location=self.device)
+        self.policy_net.load_state_dict(state_dict)
+        self.target_net.load_state_dict(state_dict)
+
 
 # ---------------------------------
 # Training loop
@@ -167,18 +202,26 @@ class DQNAgent:
 def train():
     env = LanderEnv()
     agent = DQNAgent(state_dim=STATE_SIZE, action_dim=NUM_ACTIONS)
+    dashboard = TrainingDashboard()
+
+    first_landing_episode = None
 
     for episode in range(NUM_EPISODES):
         state = env.reset()
         total_reward = 0.0
         done = False
         steps = 0
+        info = {}
+        episode_transitions = []  # collected so we can push them to the success buffer if this episode lands
 
         while not done and steps < MAX_STEPS:
             action = agent.act(state)
-            next_state, reward, done, _info = env.step(action)
+            next_state, reward, done, info = env.step(action)
 
-            agent.remember(state, action, reward, next_state, done)
+            transition = (state, action, reward, next_state, done)
+            agent.remember(*transition)
+            episode_transitions.append(transition)
+
             state = next_state
             total_reward += reward
             steps += 1
@@ -187,11 +230,23 @@ def train():
                 agent.replay()
 
         agent.decay_epsilon()
+
+        result = info.get("state", "playing")
+        if result == "landed":
+            agent.remember_success(episode_transitions)
+            if first_landing_episode is None:
+                first_landing_episode = episode
+                print(f"\n*** FIRST SUCCESSFUL LANDING AT EPISODE {episode + 1}! ***\n")
+
         print(f"Episode {episode + 1:4d} | reward: {total_reward:8.2f} | "
-              f"epsilon: {agent.epsilon:.3f} | steps: {steps}")
-    
+              f"epsilon: {agent.epsilon:.3f} | steps: {steps} | "
+              f"result: {result}")
+
+        dashboard.update(episode + 1, total_reward, result, agent.epsilon, steps)
+
     agent.save()
     print("Saved trained weights to dqn_weights.pth")
+    dashboard.keep_open()
     return agent, env
 
 
@@ -203,7 +258,7 @@ def evaluate(agent: DQNAgent, env: LanderEnv, num_episodes: int = 10):
         done = False
         steps = 0
         while not done and steps < MAX_STEPS:
-            action = agent.act(state, greedy=True)  # no exploration during eval
+            action = agent.act(state, greedy=True)
             next_state, reward, done, _info = env.step(action)
             state = next_state
             total_reward += reward

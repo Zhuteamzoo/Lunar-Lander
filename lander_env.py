@@ -1,5 +1,3 @@
-
-
 import math
 
 from lunar_lander import (
@@ -29,14 +27,24 @@ def _decode_action(action: int) -> tuple[bool, bool, bool]:
 
 
 # ---- Normalization constants -------------------------------------------
-# Rough bounds for scaling raw physics values into roughly [-1, 1].
-# Tune these if you see the agent struggling — e.g. if velocities routinely
-# exceed these bounds, widen them.
 MAX_SPEED = 250.0          # px/s, for vx and vy
 MAX_ANGULAR_VEL = 600.0    # deg/s (matches MAX_ROTATE_SPEED in your game)
 MAX_X = float(SCREEN_WIDTH)
 MAX_Y = float(SCREEN_HEIGHT)
+MAX_DIAG_DIST = math.hypot(SCREEN_WIDTH, SCREEN_HEIGHT)  # for normalizing distance in shaping
 CONTACT_ALTITUDE_THRESHOLD = 6.0  # px; below this counts as "touching ground"
+
+MAX_EPISODE_STEPS = 600
+
+# This used to be one large penalty applied only at the very end (was
+# raised from 150 to 2000). With gamma=0.99, a reward 200-300 steps away is
+# discounted to roughly 8-15% of its face value from an early-episode
+# state's perspective -- so making this number bigger mostly failed to
+# change early decisions, it just made the reward scale more lopsided.
+# Most of the "don't stall" pressure now comes from the escalating
+# per-step time penalty in _compute_reward instead; this is just a small
+# top-up applied once, at the very end, if the episode times out.
+TRUNCATION_PENALTY = 100.0
 
 # ---- State vector (10 elements, per your spec) --------------------------
 # 1. x of rocketship
@@ -51,8 +59,6 @@ CONTACT_ALTITUDE_THRESHOLD = 6.0  # px; below this counts as "touching ground"
 # 10. contact with ground (0/1)
 STATE_SIZE = 10
 TARGET_PAD_POINTS = 100
-
-MAX_EPISODE_STEPS = 1500   # ~25s of simulated time at 60fps; prevents infinite hovering
 
 
 class LanderEnv:
@@ -81,6 +87,9 @@ class LanderEnv:
         reward, done = self._compute_reward(fuel_used)
 
         truncated = self.steps_elapsed >= MAX_EPISODE_STEPS
+        if truncated and not done:
+            reward -= TRUNCATION_PENALTY
+
         info = {"state": self.game.rocket.state, "truncated": truncated}
 
         return self._get_state(), reward, (done or truncated), info
@@ -123,41 +132,54 @@ class LanderEnv:
 
     def _compute_shaping(self) -> float:
         """
-        Potential function: higher is better. Based purely on distance to
-        the 100-point pad, since that's now the only target tracked in the
-        state vector.
+        Potential function: higher is better. Combines distance AND
+        velocity into one potential, so the reward for closing the gap AND
+        slowing down is paid as a *difference* (this step's potential minus
+        last step's), not as a flat bonus. That distinction matters a lot:
+        a flat per-step bonus for "being close and slow" can be farmed
+        forever just by parking in that state, since it pays out every
+        step regardless of whether anything is actually improving. A
+        potential difference telescopes to (near) zero if the agent just
+        sits still, so there's no reward for merely staying put -- only
+        for genuinely getting closer and slower than you were a moment ago.
         """
         rocket = self.game.rocket
         pad = self._get_target_pad()
         if pad is None:
             return 0.0
         pad_cx = (pad.x1 + pad.x2) / 2.0
-        dist = math.hypot(pad_cx - rocket.x, pad.y - rocket.y) + 1.0
-        return 1.0 / dist
+        dist_norm = math.hypot(pad_cx - rocket.x, pad.y - rocket.y) / MAX_DIAG_DIST
+        speed_norm = math.hypot(rocket.vx, rocket.vy) / MAX_SPEED
+        return -(dist_norm) - (0.6 * speed_norm)
 
     def _compute_reward(self, fuel_used: float) -> tuple[float, bool]:
         rocket = self.game.rocket
 
-        # Dense shaping: reward getting closer to the 100-point pad
         shaping = self._compute_shaping()
-        shaping_reward = 500.0 * (shaping - self._prev_shaping)
+        shaping_reward = 200.0 * (shaping - self._prev_shaping)
         self._prev_shaping = shaping
 
-        # Small per-step costs to discourage stalling and wasting fuel
-        time_penalty = -0.03
-        fuel_penalty = -0.002 * fuel_used
+        step_penalty = 0
 
-        # Discourage large tilt even mid-flight, not just at touchdown
-        angle_penalty = -0.001 * abs(_normalize_angle(rocket.angle_deg))
+        # Escalating urgency: cost per step grows as the episode runs on,
+        # instead of a single penalty way out at the truncation point.
+        # This is felt immediately, every step, so it isn't neutered by
+        # gamma discounting the way a single distant penalty was -- at
+        # step 0 this is -0.05, by step 300 (episode end) it's -0.35.
+        time_penalty = -0.05 * (1.0 + self.steps_elapsed / 50.0)
 
-        reward = shaping_reward + time_penalty + fuel_penalty + angle_penalty
+        fuel_penalty = -0.05 * fuel_used
+        angle_penalty = -0.02 * abs(_normalize_angle(rocket.angle_deg))
+
+        reward = shaping_reward + step_penalty + time_penalty + fuel_penalty + angle_penalty
         done = False
 
         if rocket.state == "landed":
             reward += rocket.landed_points * 10.0
             done = True
         elif rocket.state == "crashed":
-            reward -= 100.0
+            impact_speed = math.hypot(rocket.vx, rocket.vy)
+            reward -= 250.0 + 0.3 * impact_speed
             done = True
 
         return reward, done
