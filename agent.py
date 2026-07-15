@@ -31,23 +31,23 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from lander_env import LanderEnv, STATE_SIZE, NUM_ACTIONS
+from lander_env import LanderEnv, STATE_SIZE, NUM_ACTIONS, MAX_EPISODE_STEPS
 from dashboard import TrainingDashboard
 
 # ---------------------------------
 # Hyperparameters
 
 GAMMA = 0.99
-LEARNING_RATE = 1e-3
+LEARNING_RATE = 0.001
 EPSILON_START = 1.0
 EPSILON_MIN = 0.01
-EPSILON_DECAY = 0.995
+EPSILON_DECAY = 0.996
 BUFFER_SIZE = 100_000
 BATCH_SIZE = 100
 NUM_EPISODES = 1000
 
-# Matches lander_env.py's MAX_EPISODE_STEPS (500).
-MAX_STEPS = 500
+# Matches lander_env.py's MAX_EPISODE_STEPS.
+MAX_STEPS = MAX_EPISODE_STEPS
 
 TARGET_UPDATE_EVERY = 600
 
@@ -64,7 +64,7 @@ TRAIN_EVERY = 4
 # Experience Replay, without needing TD-error-based sampling weights.
 SUCCESS_BUFFER_SIZE = 20_000
 SUCCESS_BATCH_RATIO = 0.25   # fraction of each batch drawn from successes, once available
-SUCCESS_MIN_TO_MIX = 50      # don't start mixing until the buffer has at least this many
+SUCCESS_MIN_TO_MIX = 20      # don't start mixing until the buffer has at least this many
 
 
 # ---------------------------------
@@ -254,7 +254,7 @@ def evaluate(agent: DQNAgent, env: LanderEnv, num_episodes: int = 10):
     total_rewards = []
     for _ in range(num_episodes):
         state = env.reset()
-        total_reward = 0.0
+        total_reward = 0.0 
         done = False
         steps = 0
         while not done and steps < MAX_STEPS:

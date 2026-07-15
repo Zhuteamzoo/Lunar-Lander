@@ -142,7 +142,7 @@ def place_landing_pads() -> list[LandingPad]:
             pads.append(LandingPad(x1=x1, x2=x1 + width, y=(min_y + max_y) / 2, points=spec["points"]))
             occupied.append((x1, x1 + width))
 
-    pads.sort(key=lambda p: p.x1)
+    pads.sort(key=lambda p: p.x1) 
     return pads
 
 

@@ -51,6 +51,7 @@ class TrainingDashboard:
 
         self.episodes = []
         self.rewards = []
+        self.steps = []
         self.state_values = []
         self.landed_counts = []
         self.crashed_counts = []
@@ -65,7 +66,7 @@ class TrainingDashboard:
 
     def _draw_static_labels(self):
         self.ax_main.set_title(
-            "Reward per Episode  (red = reward, blue = outcome)",
+            "Reward per Episode  (red = reward, blue = outcome, green = steps)",
             color=TEXT_COLOR, fontsize=12, fontweight="bold", loc="left",
         )
         self.ax_band.set_title(
@@ -84,6 +85,7 @@ class TrainingDashboard:
 
         self.episodes.append(episode)
         self.rewards.append(reward)
+        self.steps.append(steps)
         self.state_values.append(OUTCOME_VALUE[result])
         self.landed_counts.append(self._landed)
         self.crashed_counts.append(self._crashed)
@@ -106,6 +108,7 @@ class TrainingDashboard:
 
         # -- main reward line --
         self.ax_main.plot(self.episodes, self.rewards, color=REWARD_COLOR, linewidth=1.3)
+        self.ax_main.plot(self.episodes, self.steps, color="#4caf50", linewidth=1.0, alpha=0.8)
         self.ax_main.set_ylabel("Reward", color=REWARD_COLOR)
         self.ax_main.tick_params(axis="y", colors=REWARD_COLOR)
         self.ax_main.tick_params(axis="x", colors=TEXT_COLOR)

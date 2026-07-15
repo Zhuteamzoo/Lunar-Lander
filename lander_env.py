@@ -34,17 +34,9 @@ MAX_Y = float(SCREEN_HEIGHT)
 MAX_DIAG_DIST = math.hypot(SCREEN_WIDTH, SCREEN_HEIGHT)  # for normalizing distance in shaping
 CONTACT_ALTITUDE_THRESHOLD = 6.0  # px; below this counts as "touching ground"
 
-MAX_EPISODE_STEPS = 600
+MAX_EPISODE_STEPS = 1000
 
-# This used to be one large penalty applied only at the very end (was
-# raised from 150 to 2000). With gamma=0.99, a reward 200-300 steps away is
-# discounted to roughly 8-15% of its face value from an early-episode
-# state's perspective -- so making this number bigger mostly failed to
-# change early decisions, it just made the reward scale more lopsided.
-# Most of the "don't stall" pressure now comes from the escalating
-# per-step time penalty in _compute_reward instead; this is just a small
-# top-up applied once, at the very end, if the episode times out.
-TRUNCATION_PENALTY = 100.0
+TRUNCATION_PENALTY = 600.0
 
 # ---- State vector (10 elements, per your spec) --------------------------
 # 1. x of rocketship
