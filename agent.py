@@ -23,6 +23,8 @@
 # --------------------------------
 # Libraries
 
+import os
+import pickle
 import random
 from collections import deque
 
@@ -49,7 +51,7 @@ NUM_EPISODES = 1000
 # Matches lander_env.py's MAX_EPISODE_STEPS.
 MAX_STEPS = MAX_EPISODE_STEPS
 
-TARGET_UPDATE_EVERY = 600
+TARGET_UPDATE_EVERY = 150
 
 # Was 1 (train every single step). Training every 4th step instead cuts the
 # total number of gradient updates ~4x with little loss in data efficiency,
@@ -65,6 +67,11 @@ TRAIN_EVERY = 4
 SUCCESS_BUFFER_SIZE = 20_000
 SUCCESS_BATCH_RATIO = 0.25   # fraction of each batch drawn from successes, once available
 SUCCESS_MIN_TO_MIX = 20      # don't start mixing until the buffer has at least this many
+
+# Human demonstrations recorded via record_demos.py. Loaded once at the
+# start of training and pushed into success_memory, so the agent has
+# examples of what a landing looks like before it has ever landed on its own.
+HUMAN_DEMO_FILE = "human_demos.pkl"
 
 
 # ---------------------------------
@@ -139,6 +146,41 @@ class DQNAgent:
         for t in transitions:
             self.success_memory.append(t)
 
+    def load_human_demos(self, path: str = HUMAN_DEMO_FILE, also_into_main_buffer: bool = True):
+        """
+        Seeds the success buffer with transitions recorded from human play
+        (via record_demos.py). Call once, right after constructing the
+        agent and before training starts.
+
+        The demo file is a list of episodes; each episode is a list of
+        (state, action, reward, next_state, done) tuples using the same
+        encoding as LanderEnv, so they slot directly into the replay
+        buffers alongside the agent's own experience.
+
+        also_into_main_buffer: also copies transitions into the regular
+        replay buffer (not just success_memory), so the network also sees
+        the earlier, non-terminal states of a landing approach at normal
+        sampling frequency, not just via the success-buffer mixing ratio.
+        """
+        if not os.path.exists(path):
+            print(f"No human demo file found at {path} -- skipping.")
+            return 0
+
+        with open(path, "rb") as f:
+            episodes = pickle.load(f)
+
+        n_transitions = 0
+        for episode_transitions in episodes:
+            self.remember_success(episode_transitions)
+            if also_into_main_buffer:
+                for t in episode_transitions:
+                    self.memory.append(t)
+            n_transitions += len(episode_transitions)
+
+        print(f"Loaded {len(episodes)} human demo landing(s) "
+              f"({n_transitions} transitions) from {path}")
+        return len(episodes)
+
     def save(self, path: str = "dqn_weights.pth"):
         torch.save(self.policy_net.state_dict(), path)
 
@@ -202,6 +244,7 @@ class DQNAgent:
 def train():
     env = LanderEnv()
     agent = DQNAgent(state_dim=STATE_SIZE, action_dim=NUM_ACTIONS)
+    agent.load_human_demos()   # seeds success_memory with your recorded landings, if any exist
     dashboard = TrainingDashboard()
 
     first_landing_episode = None

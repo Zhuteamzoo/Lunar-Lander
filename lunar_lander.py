@@ -40,6 +40,8 @@ PAD_SPECS = [
     {"width": 34, "points": 100},  # tiny, just wider than the rocket
 ]
 
+SPAWN_X = SCREEN_WIDTH * 0.5
+SPAWN_EXCLUSION_HALF_WIDTH = 70.0 
 
 @dataclass
 class LandingPad:
@@ -102,7 +104,7 @@ def pad_for_segment(a: tuple[float, float], b: tuple[float, float], pads: list[L
     seg_x1, seg_x2 = min(ax, bx), max(ax, bx)
     for pad in pads:
         if abs(ay - pad.y) < 0.5 and seg_x1 >= pad.x1 - 1 and seg_x2 <= pad.x2 + 1:
-            return pad
+            return pad 
     return None
 
 
@@ -113,6 +115,9 @@ def place_landing_pads() -> list[LandingPad]:
     max_y = SCREEN_HEIGHT - 60
     usable_left = margin
     usable_right = SCREEN_WIDTH - margin
+
+    spawn_x1 = SPAWN_X - SPAWN_EXCLUSION_HALF_WIDTH
+    spawn_x2 = SPAWN_X + SPAWN_EXCLUSION_HALF_WIDTH
 
     specs = PAD_SPECS.copy()
     random.shuffle(specs)
@@ -128,23 +133,30 @@ def place_landing_pads() -> list[LandingPad]:
             x2 = x1 + width
             if any(not (x2 + min_gap < ox1 or x1 > ox2 + min_gap) for ox1, ox2 in occupied):
                 continue
+            if not (x2 < spawn_x1 or x1 > spawn_x2):  # overlaps spawn exclusion zone
+                continue
             pad_y = random.uniform(min_y, max_y)
             pads.append(LandingPad(x1=x1, x2=x2, y=pad_y, points=spec["points"]))
             occupied.append((x1, x2))
             placed = True
             break
         if not placed:
-            # Fallback: evenly space pads if random placement fails
+            # Fallback: evenly space pads if random placement fails, avoiding spawn zone
             slot = len(pads)
             span = usable_right - usable_left
             x1 = usable_left + slot * (span / len(PAD_SPECS)) + min_gap
             x1 = clamp(x1, usable_left, usable_right - width)
+            # nudge away from spawn zone if the fallback slot lands inside it
+            if not (x1 + width < spawn_x1 or x1 > spawn_x2):
+                if x1 < SPAWN_X:
+                    x1 = clamp(spawn_x1 - width, usable_left, usable_right - width)
+                else:
+                    x1 = clamp(spawn_x2, usable_left, usable_right - width)
             pads.append(LandingPad(x1=x1, x2=x1 + width, y=(min_y + max_y) / 2, points=spec["points"]))
             occupied.append((x1, x1 + width))
 
     pads.sort(key=lambda p: p.x1) 
     return pads
-
 
 def generate_terrain() -> tuple[list[tuple[float, float]], list[LandingPad]]:
     margin = 20

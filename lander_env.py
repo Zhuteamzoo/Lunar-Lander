@@ -124,16 +124,12 @@ class LanderEnv:
 
     def _compute_shaping(self) -> float:
         """
-        Potential function: higher is better. Combines distance AND
-        velocity into one potential, so the reward for closing the gap AND
-        slowing down is paid as a *difference* (this step's potential minus
-        last step's), not as a flat bonus. That distinction matters a lot:
-        a flat per-step bonus for "being close and slow" can be farmed
-        forever just by parking in that state, since it pays out every
-        step regardless of whether anything is actually improving. A
-        potential difference telescopes to (near) zero if the agent just
-        sits still, so there's no reward for merely staying put -- only
-        for genuinely getting closer and slower than you were a moment ago.
+        Potential function: higher is better. Distance term always applies.
+        Speed term is scaled by proximity to the pad -- moving fast is fine
+        (even rewarded, via the distance term) while far away, and only
+        becomes costly as the rocket closes in, so the agent learns to
+        approach quickly and only decelerate near the pad, instead of
+        creeping the entire way there.
         """
         rocket = self.game.rocket
         pad = self._get_target_pad()
@@ -142,7 +138,11 @@ class LanderEnv:
         pad_cx = (pad.x1 + pad.x2) / 2.0
         dist_norm = math.hypot(pad_cx - rocket.x, pad.y - rocket.y) / MAX_DIAG_DIST
         speed_norm = math.hypot(rocket.vx, rocket.vy) / MAX_SPEED
-        return -(dist_norm) - (0.6 * speed_norm)
+
+        proximity = 1.0 - dist_norm  # ~0 far from pad, ~1 right on top of it
+        speed_penalty_weight = 0.9 * (proximity ** 2)  # squared so it's negligible until genuinely close
+
+        return -dist_norm - speed_penalty_weight * speed_norm
 
     def _compute_reward(self, fuel_used: float) -> tuple[float, bool]:
         rocket = self.game.rocket
