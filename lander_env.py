@@ -36,7 +36,7 @@ CONTACT_ALTITUDE_THRESHOLD = 6.0  # px; below this counts as "touching ground"
 
 MAX_EPISODE_STEPS = 1000
 
-TRUNCATION_PENALTY = 600.0
+TRUNCATION_PENALTY = 60.0
 
 # ---- State vector (10 elements, per your spec) --------------------------
 # 1. x of rocketship
@@ -140,7 +140,7 @@ class LanderEnv:
         speed_norm = math.hypot(rocket.vx, rocket.vy) / MAX_SPEED
 
         proximity = 1.0 - dist_norm  # ~0 far from pad, ~1 right on top of it
-        speed_penalty_weight = 0.9 * (proximity ** 2)  # squared so it's negligible until genuinely close
+        speed_penalty_weight = 0.9 * max(0.0, (proximity - 0.7) / 0.3) ** 2 
 
         return -dist_norm - speed_penalty_weight * speed_norm
 
@@ -151,31 +151,23 @@ class LanderEnv:
         shaping_reward = 200.0 * (shaping - self._prev_shaping)
         self._prev_shaping = shaping
 
-        step_penalty = 0
-
-        # Escalating urgency: cost per step grows as the episode runs on,
-        # instead of a single penalty way out at the truncation point.
-        # This is felt immediately, every step, so it isn't neutered by
-        # gamma discounting the way a single distant penalty was -- at
-        # step 0 this is -0.05, by step 300 (episode end) it's -0.35.
         time_penalty = -0.05 * (1.0 + self.steps_elapsed / 50.0)
-
         fuel_penalty = -0.05 * fuel_used
         angle_penalty = -0.02 * abs(_normalize_angle(rocket.angle_deg))
 
-        reward = shaping_reward + step_penalty + time_penalty + fuel_penalty + angle_penalty
+        reward = shaping_reward + time_penalty + fuel_penalty + angle_penalty
         done = False
 
         if rocket.state == "landed":
-            reward += rocket.landed_points * 10.0
+            reward += rocket.landed_points * 1.0     # was *10.0 -> max +100 instead of +1000
             done = True
         elif rocket.state == "crashed":
             impact_speed = math.hypot(rocket.vx, rocket.vy)
-            reward -= 250.0 + 0.3 * impact_speed
+            reward -= 25.0 + 0.05 * impact_speed       # was 250 / 0.3 -> max around -40 instead of -340
             done = True
 
+        reward = max(-60.0, min(60.0, reward))         # safety net, rarely triggers now
         return reward, done
-
 
 def _normalize_angle(angle_deg: float) -> float:
     a = angle_deg % 360.0

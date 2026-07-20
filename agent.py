@@ -47,11 +47,14 @@ EPSILON_DECAY = 0.996
 BUFFER_SIZE = 100_000
 BATCH_SIZE = 100
 NUM_EPISODES = 1000
+EVAL_EVERY = 25       # run a checkpoint eval every N training episodes
+EVAL_EPISODES = 5     # how many greedy episodes per eval
 
 # Matches lander_env.py's MAX_EPISODE_STEPS.
+
 MAX_STEPS = MAX_EPISODE_STEPS
 
-TARGET_UPDATE_EVERY = 150
+TARGET_UPDATE_EVERY = 500
 
 # Was 1 (train every single step). Training every 4th step instead cuts the
 # total number of gradient updates ~4x with little loss in data efficiency,
@@ -93,6 +96,7 @@ class DQN(nn.Module):
 # ---------------------------------
 # Agent
 
+
 class DQNAgent:
     def __init__(
         self,
@@ -111,6 +115,8 @@ class DQNAgent:
         self.epsilon = epsilon
         self.epsilon_min = epsilon_min
         self.epsilon_decay = epsilon_decay
+
+        self.env_step_count = 0
 
         self.memory = deque(maxlen=buffer_size)
         self.success_memory = deque(maxlen=SUCCESS_BUFFER_SIZE)
@@ -135,6 +141,11 @@ class DQNAgent:
             state_t = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
             q_values = self.policy_net(state_t)
             return int(torch.argmax(q_values, dim=1).item())
+    def on_env_step(self):
+        """Call once per environment step (not per replay() call) to drive target sync."""
+        self.env_step_count += 1
+        if self.env_step_count % TARGET_UPDATE_EVERY == 0:
+            self.target_net.load_state_dict(self.policy_net.state_dict())
 
     def remember(self, state, action, reward, next_state, done):
         self.memory.append((state, action, reward, next_state, done))
@@ -217,18 +228,18 @@ class DQNAgent:
         q_values = self.policy_net(states).gather(1, actions)
 
         with torch.no_grad():
-            next_q_values = self.target_net(next_states).max(dim=1, keepdim=True)[0]
+            next_actions = self.policy_net(next_states).argmax(dim=1, keepdim=True)
+            next_q_values = self.target_net(next_states).gather(1, next_actions)
             targets = rewards + self.gamma * next_q_values * (1.0 - dones)
 
         loss = self.loss_fn(q_values, targets)
 
         self.optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=10.0)
         self.optimizer.step()
 
         self.train_step_count += 1
-        if self.train_step_count % TARGET_UPDATE_EVERY == 0:
-            self.target_net.load_state_dict(self.policy_net.state_dict())
 
         return loss.item()
 
@@ -247,6 +258,9 @@ def train():
     agent.load_human_demos()   # seeds success_memory with your recorded landings, if any exist
     dashboard = TrainingDashboard()
 
+    first_landing_episode = None
+
+    best_eval_score = -float("inf")
     first_landing_episode = None
 
     for episode in range(NUM_EPISODES):
@@ -268,6 +282,7 @@ def train():
             state = next_state
             total_reward += reward
             steps += 1
+            agent.on_env_step()
 
             if steps % TRAIN_EVERY == 0:
                 agent.replay()
@@ -286,10 +301,21 @@ def train():
               f"result: {result}")
 
         dashboard.update(episode + 1, total_reward, result, agent.epsilon, steps)
+        
+        if (episode + 1) % EVAL_EVERY == 0:
+            eval_rewards = evaluate(agent, env, num_episodes=EVAL_EPISODES)
+            eval_score = float(np.mean(eval_rewards))
+            print(f"[checkpoint] episode {episode+1}: eval avg reward {eval_score:.1f} "
+                  f"(best so far: {best_eval_score:.1f})")
+            if eval_score > best_eval_score:
+                best_eval_score = eval_score
+                agent.save("dqn_weights_best.pth")
+                print("  -> new best, saved dqn_weights_best.pth")
 
     agent.save()
     print("Saved trained weights to dqn_weights.pth")
     dashboard.keep_open()
+    agent.save("dqn_weights_final.pth")
     return agent, env
 
 

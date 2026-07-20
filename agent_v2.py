@@ -48,6 +48,7 @@ BATCH_SIZE = 500
 next_state, reward, done, info = env.step(0)
 print(next_state, reward, done, info)
 
+
 class DQN(nn.module):
     def __init__(self, input_dim: int, output_dim: int):
         super.__init__()
@@ -58,6 +59,8 @@ class DQN(nn.module):
         x = torch.relu(self.fc1(x))
         x = torch.relu(self.fc2(x))
         return self.fc3(x)
+    
+
 class DQNAgent:
     def __init__(
         self,
