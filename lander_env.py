@@ -50,18 +50,18 @@ TRUNCATION_PENALTY = 60.0
 # 8. x distance to center of 100-point pad
 # 9. y distance to center of 100-point pad
 # 10. contact with ground (0/1)
-STATE_SIZE = 10
 TARGET_PAD_POINTS = 100
 N_TERRAIN_SAMPLES = 9
 TERRAIN_SPAN = 200.0
 STATE_SIZE = 10 + N_TERRAIN_SAMPLES + 1
 
 class LanderEnv:
-    def __init__(self):
+    def __init__(self, target_points = TARGET_PAD_POINTS):
         self.game = LanderGame()
         self.dt = 1.0 / FPS
         self.steps_elapsed = 0
         self._prev_shaping = None
+        self.target_points = target_points
 
     # -- core Gym-like API -------------------------------------------------
 
@@ -79,11 +79,11 @@ class LanderEnv:
          i = int(min(max(x,0), SCREEN_WIDTH))
          return float(self._hy[i])
 
-    def _terrain_features(self):
+    def _terrain_features(self, altitude):
         r = self.game.rocket
         offests = np.linspace(-TERRAIN_SPAN, TERRAIN_SPAN, N_TERRAIN_SAMPLES)
         feats = [(self._ground_y(r.x + o) - r.y) / MAX_Y for o in offests]
-        feats.append(self.game.altitude() / MAX_Y)
+        feats.append(altitude / MAX_Y)
         return feats
 
     def step(self, action: int):
@@ -100,7 +100,11 @@ class LanderEnv:
         if truncated and not done:
             reward -= TRUNCATION_PENALTY
 
-        info = {"state": self.game.rocket.state, "truncated": truncated}
+        info = {
+            "state": self.game.rocket.state,
+            "truncated": truncated,
+            "terminal": done,
+        }
 
         return self._get_state(), reward, (done or truncated), info
 
@@ -108,11 +112,12 @@ class LanderEnv:
 
     def _get_target_pad(self):
         for pad in self.game.landing_pads:
-            if pad.points == TARGET_PAD_POINTS:
+            if pad.points == self.target_points:
                 return pad
         return None  # shouldn't happen given PAD_SPECS, but guard anyway
 
     def _get_state(self) -> list[float]:
+        altitude = self.game.altitude()
         rocket = self.game.rocket
         pad = self._get_target_pad()
 
@@ -123,7 +128,7 @@ class LanderEnv:
         else:
             dx, dy = 0.0, 0.0
 
-        ground_contact = 1.0 if self.game.altitude() < CONTACT_ALTITUDE_THRESHOLD else 0.0
+        ground_contact = 1.0 if altitude < CONTACT_ALTITUDE_THRESHOLD else 0.0
 
         state = [
             rocket.x / MAX_X,
@@ -138,7 +143,7 @@ class LanderEnv:
             ground_contact,
         ]
 
-        return state + self._terrain_features
+        return state + self._terrain_features(altitude)
     
 
     # -- reward ------------------------------------------------------------

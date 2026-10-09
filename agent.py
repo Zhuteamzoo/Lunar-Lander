@@ -43,13 +43,17 @@ GAMMA = 0.99
 LEARNING_RATE = 0.001
 EPSILON_START = 1.0
 EPSILON_MIN = 0.05
-EPSILON_DECAY = 0.997
+EPSILON_DECAY = 0.995
 BUFFER_SIZE = 100_000
 BATCH_SIZE = 200
-NUM_EPISODES = 1000
-EVAL_EVERY = 25       # run a checkpoint eval every N training episodes
-EVAL_EPISODES = 5     # how many greedy episodes per eval
+NUM_EPISODES = 1500
+EVAL_EVERY = 50       # run a checkpoint eval every N training episodes
+EVAL_EPISODES = 20     # how many greedy episodes per eval
+EVAL_SEEDS = [10_000 + i for i in range(EVAL_EPISODES)]
 
+CURRICULUM = [10, 50, 100]
+ADVANCE_LANDING_RATE = 0.6
+PHASE_EPSILON_BUMP = 0.3
 # Matches lander_env.py's MAX_EPISODE_STEPS.
 
 MAX_STEPS = MAX_EPISODE_STEPS
@@ -170,16 +174,25 @@ class DQNAgent:
             episodes = pickle.load(f)
 
         n_transitions = 0
+        skipped = 0
+        loaded = 0
         for episode_transitions in episodes:
+            if not episode_transitions or len(episode_transitions[0][0]) != self.state_dim:
+                skipped += 1
+                continue
+            loaded += 1
             self.remember_success(episode_transitions)
             if also_into_main_buffer:
                 for t in episode_transitions:
                     self.memory.append(t)
             n_transitions += len(episode_transitions)
 
+        if skipped:
+            print(f"Skipped {skipped} demo(s) with a different state size -- re-record them.")
+
         print(f"Loaded {len(episodes)} human demo landing(s) "
               f"({n_transitions} transitions) from {path}")
-        return len(episodes)
+        return loaded
 
     def save(self, path: str = "dqn_weights.pth"):
         torch.save(self.policy_net.state_dict(), path)
@@ -242,15 +255,16 @@ class DQNAgent:
 def train():
     env = LanderEnv()
     agent = DQNAgent(state_dim=STATE_SIZE, action_dim=NUM_ACTIONS)
-    agent.load_human_demos()   # seeds success_memory with your recorded landings, if any exist
     dashboard = TrainingDashboard()
 
+    phase = 0
+    env.target_points = CURRICULUM[phase]
+    print(f"Curriculum phase 1/{len(CURRICULUM)}: target pad = {env.target_points} pts")
+
+    best_eval_score = (-1.0, -float("inf"))   # (landing_rate, mean_reward)
     first_landing_episode = None
 
-    best_eval_score = -float("inf")
-    first_landing_episode = None
-    
-    agent.load_human_demos()
+    agent.load_human_demos()                  # the ONLY call now
     if len(agent.memory) >= BATCH_SIZE:
         for _ in range(200):
             agent.replay()
@@ -261,13 +275,14 @@ def train():
         done = False
         steps = 0
         info = {}
-        episode_transitions = []  # collected so we can push them to the success buffer if this episode lands
+        episode_transitions = []
 
         while not done and steps < MAX_STEPS:
             action = agent.act(state)
             next_state, reward, done, info = env.step(action)
 
-            transition = (state, action, reward, next_state, done)
+            # store the TRUE terminal flag, not the time-out flag
+            transition = (state, action, reward, next_state, info["terminal"])
             agent.remember(*transition)
             episode_transitions.append(transition)
 
@@ -291,46 +306,67 @@ def train():
         print(f"Episode {episode + 1:4d} | reward: {total_reward:8.2f} | "
               f"epsilon: {agent.epsilon:.3f} | steps: {steps} | "
               f"result: {result}")
-
         dashboard.update(episode + 1, total_reward, result, agent.epsilon, steps)
-        
+
         if (episode + 1) % EVAL_EVERY == 0:
-            eval_rewards = evaluate(agent, env, num_episodes=EVAL_EPISODES)
-            eval_score = float(np.mean(eval_rewards))
-            print(f"[checkpoint] episode {episode+1}: eval avg reward {eval_score:.1f} "
-                  f"(best so far: {best_eval_score:.1f})")
-            if eval_score > best_eval_score:
+            eval_rewards, eval_landings = evaluate(agent, env)
+            landing_rate = eval_landings / len(eval_rewards)
+            eval_score = (landing_rate, float(np.mean(eval_rewards)))
+            print(f"[checkpoint] episode {episode+1}: landing rate {landing_rate:.0%}, "
+                  f"avg reward {eval_score[1]:.1f}")
+
+            if eval_score > best_eval_score:       # landing rate first, reward breaks ties
                 best_eval_score = eval_score
-                agent.save("dqn_weights_best.pth")
-                print("  -> new best, saved dqn_weights_best.pth")
+                best_path = f"dqn_weights_best_phase{CURRICULUM[phase]}.pth"
+                agent.save(best_path)
+                print(f"  -> new best, saved {best_path}")
+
+            if phase < len(CURRICULUM) - 1 and landing_rate >= ADVANCE_LANDING_RATE:
+                agent.save(f"dqn_weights_phase{CURRICULUM[phase]}.pth")
+                phase += 1
+                env.target_points = CURRICULUM[phase]
+                best_eval_score = (-1.0, -float("inf"))   # new target, new yardstick
+                agent.epsilon = max(agent.epsilon, PHASE_EPSILON_BUMP)
+                print(f"*** Curriculum phase {phase + 1}/{len(CURRICULUM)}: "
+                      f"target pad = {env.target_points} pts ***")
 
     agent.save()
+    agent.save("dqn_weights_final.pth")    # moved before keep_open(), which likely blocks
     print("Saved trained weights to dqn_weights.pth")
     dashboard.keep_open()
-    agent.save("dqn_weights_final.pth")
     return agent, env
 
 
-def evaluate(agent: DQNAgent, env: LanderEnv, num_episodes: int = 10):
+def evaluate(agent: DQNAgent, env: LanderEnv, num_episodes: int = EVAL_EPISODES, seeded: bool = True):
+    """Greedy evaluation on a fixed set of terrains. Returns (rewards, num_landings)."""
     total_rewards = []
-    for _ in range(num_episodes):
+    landings = 0
+    rng_state = random.getstate()          # so eval doesn't disturb training randomness
+
+    for i in range(num_episodes):
+        if seeded:
+            random.seed(EVAL_SEEDS[i % len(EVAL_SEEDS)])
         state = env.reset()
-        total_reward = 0.0 
+        total_reward = 0.0
         done = False
         steps = 0
+        info = {}
         while not done and steps < MAX_STEPS:
             action = agent.act(state, greedy=True)
-            next_state, reward, done, _info = env.step(action)
-            state = next_state
+            state, reward, done, info = env.step(action)
             total_reward += reward
             steps += 1
         total_rewards.append(total_reward)
+        if info.get("state") == "landed" and env.game.rocket.landed_points == env.target_points:
+            landings += 1
 
-    print(f"Average Total Reward (Evaluation over {num_episodes} episodes): "
-          f"{np.mean(total_rewards):.2f}")
-    return total_rewards
+    random.setstate(rng_state)
+    print(f"Evaluation over {num_episodes} episodes: {landings} landings, "
+          f"avg reward {np.mean(total_rewards):.2f}")
+    return total_rewards, landings
 
 
 if __name__ == "__main__":
     trained_agent, env = train()
+    env.target_points = CURRICULUM[-1]     # judge the final model on the real target
     evaluate(trained_agent, env)

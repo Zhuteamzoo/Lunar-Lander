@@ -58,7 +58,7 @@ def main():
     font = pygame.font.SysFont("consolas", 20)
     big_font = pygame.font.SysFont("consolas", 30)
 
-    env = LanderEnv()
+    env = LanderEnv(target_points=10)
     demos = load_demos()
     print(f"Loaded {len(demos)} previously saved landing(s) from {DEMO_FILE}")
 
@@ -81,12 +81,12 @@ def main():
         action = _action_from_keys(keys)
 
         next_state, reward, done, info = env.step(action)
-        episode_transitions.append((state, action, reward, next_state, done))
+        episode_transitions.append((state, action, reward, next_state, info["terminal"]))
         state = next_state
 
         if done:
             result = info.get("state", "playing")
-            if result == "landed":
+            if result == "landed" and env.game.rocket.landed_points == env.target_points:
                 demos.append(episode_transitions)
                 save_demos(demos)
                 session_landings += 1
@@ -107,6 +107,7 @@ def main():
             f"DEMOS SAVED: {len(demos)}  (this session: {session_landings})",
             f"ALTITUDE: {env.game.altitude():6.1f}",
             "UP: thrust   LEFT/RIGHT: rotate   Q: quit",
+            f"TARGET PAD: {env.target_points} pts"
         ]
         y = 12
         for line in hud:
