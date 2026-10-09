@@ -42,10 +42,10 @@ from dashboard import TrainingDashboard
 GAMMA = 0.99
 LEARNING_RATE = 0.001
 EPSILON_START = 1.0
-EPSILON_MIN = 0.01
-EPSILON_DECAY = 0.996
+EPSILON_MIN = 0.05
+EPSILON_DECAY = 0.997
 BUFFER_SIZE = 100_000
-BATCH_SIZE = 100
+BATCH_SIZE = 200
 NUM_EPISODES = 1000
 EVAL_EVERY = 25       # run a checkpoint eval every N training episodes
 EVAL_EPISODES = 5     # how many greedy episodes per eval
@@ -56,24 +56,13 @@ MAX_STEPS = MAX_EPISODE_STEPS
 
 TARGET_UPDATE_EVERY = 500
 
-# Was 1 (train every single step). Training every 4th step instead cuts the
-# total number of gradient updates ~4x with little loss in data efficiency,
-# since consecutive steps are highly correlated anyway -- this is the
-# single biggest lever on wall-clock training time.
+
 TRAIN_EVERY = 4
 
-# Successful landings are rare, so a uniformly-sampled batch mostly won't
-# contain any. This keeps a second buffer holding only transitions from
-# episodes that ended in a landing, and mixes a fixed fraction of every
-# training batch from it -- a simpler stand-in for full Prioritized
-# Experience Replay, without needing TD-error-based sampling weights.
 SUCCESS_BUFFER_SIZE = 20_000
-SUCCESS_BATCH_RATIO = 0.25   # fraction of each batch drawn from successes, once available
-SUCCESS_MIN_TO_MIX = 20      # don't start mixing until the buffer has at least this many
+SUCCESS_BATCH_RATIO = 0.25  
+SUCCESS_MIN_TO_MIX = 10     
 
-# Human demonstrations recorded via record_demos.py. Loaded once at the
-# start of training and pushed into success_memory, so the agent has
-# examples of what a landing looks like before it has ever landed on its own.
 HUMAN_DEMO_FILE = "human_demos.pkl"
 
 
@@ -83,9 +72,9 @@ HUMAN_DEMO_FILE = "human_demos.pkl"
 class DQN(nn.Module):
     def __init__(self, input_dim: int, output_dim: int):
         super().__init__()
-        self.fc1 = nn.Linear(input_dim, 128)
-        self.fc2 = nn.Linear(128, 128)
-        self.fc3 = nn.Linear(128, output_dim)
+        self.fc1 = nn.Linear(input_dim, 256)
+        self.fc2 = nn.Linear(256, 256)
+        self.fc3 = nn.Linear(256, output_dim)
 
     def forward(self, x):
         x = torch.relu(self.fc1(x))
@@ -202,15 +191,13 @@ class DQNAgent:
     def replay(self, batch_size: int = BATCH_SIZE):
         if len(self.memory) < batch_size:
             return None
-
-        # Mix in a fixed fraction from the success buffer, once it has
-        # enough transitions to draw from. This guarantees the network
-        # sees landing outcomes regularly instead of only when a uniform
-        # sample from the (mostly failure-filled) main buffer happens to
-        # include one.
+        if len(self.memory)<150:
+            current_ratio = 0.4
+        else:
+            current_ratio = SUCCESS_BATCH_RATIO
         n_success = 0
         if len(self.success_memory) >= SUCCESS_MIN_TO_MIX:
-            n_success = min(int(batch_size * SUCCESS_BATCH_RATIO), len(self.success_memory))
+            n_success = min(int(batch_size * current_ratio), len(self.success_memory))
         n_regular = batch_size - n_success
 
         minibatch = random.sample(self.memory, n_regular)
@@ -262,6 +249,11 @@ def train():
 
     best_eval_score = -float("inf")
     first_landing_episode = None
+    
+    agent.load_human_demos()
+    if len(agent.memory) >= BATCH_SIZE:
+        for _ in range(200):
+            agent.replay()
 
     for episode in range(NUM_EPISODES):
         state = env.reset()

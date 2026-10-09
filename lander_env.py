@@ -1,4 +1,5 @@
 import math
+import numpy as np
 
 from lunar_lander import (
     LanderGame,
@@ -51,7 +52,9 @@ TRUNCATION_PENALTY = 60.0
 # 10. contact with ground (0/1)
 STATE_SIZE = 10
 TARGET_PAD_POINTS = 100
-
+N_TERRAIN_SAMPLES = 9
+TERRAIN_SPAN = 200.0
+STATE_SIZE = 10 + N_TERRAIN_SAMPLES + 1
 
 class LanderEnv:
     def __init__(self):
@@ -64,9 +67,24 @@ class LanderEnv:
 
     def reset(self) -> list[float]:
         self.game.new_terrain()
+        xs = [p[0] for p in self.game.terrain_points]
+        ys = [p[1] for p in self.game.terrain_points]
+        self._hx = np.arange(0, SCREEN_WIDTH + 1)
+        self._hy = np.interp(self._hx, xs, ys)
         self.steps_elapsed = 0
         self._prev_shaping = self._compute_shaping()
         return self._get_state()
+
+    def _ground_y(self,x):
+         i = int(min(max(x,0), SCREEN_WIDTH))
+         return float(self._hy[i])
+
+    def _terrain_features(self):
+        r = self.game.rocket
+        offests = np.linspace(-TERRAIN_SPAN, TERRAIN_SPAN, N_TERRAIN_SAMPLES)
+        feats = [(self._ground_y(r.x + o) - r.y) / MAX_Y for o in offests]
+        feats.append(self.game.altitude() / MAX_Y)
+        return feats
 
     def step(self, action: int):
         thrust, rotate_left, rotate_right = _decode_action(action)
@@ -107,7 +125,7 @@ class LanderEnv:
 
         ground_contact = 1.0 if self.game.altitude() < CONTACT_ALTITUDE_THRESHOLD else 0.0
 
-        return [
+        state = [
             rocket.x / MAX_X,
             rocket.y / MAX_Y,
             rocket.vx / MAX_SPEED,
@@ -119,6 +137,9 @@ class LanderEnv:
             dy,
             ground_contact,
         ]
+
+        return state + self._terrain_features
+    
 
     # -- reward ------------------------------------------------------------
 
@@ -148,25 +169,22 @@ class LanderEnv:
         rocket = self.game.rocket
 
         shaping = self._compute_shaping()
-        shaping_reward = 200.0 * (shaping - self._prev_shaping)
+        shaping_reward = 300.0 * (shaping - self._prev_shaping)
         self._prev_shaping = shaping
 
-        time_penalty = -0.05 * (1.0 + self.steps_elapsed / 50.0)
-        fuel_penalty = -0.05 * fuel_used
         angle_penalty = -0.02 * abs(_normalize_angle(rocket.angle_deg))
 
-        reward = shaping_reward + time_penalty + fuel_penalty + angle_penalty
+        reward = shaping_reward + angle_penalty
         done = False
 
         if rocket.state == "landed":
-            reward += rocket.landed_points * 1.0     # was *10.0 -> max +100 instead of +1000
+            reward += 400.0 + rocket.landed_points * 3.0
             done = True
         elif rocket.state == "crashed":
             impact_speed = math.hypot(rocket.vx, rocket.vy)
-            reward -= 25.0 + 0.05 * impact_speed       # was 250 / 0.3 -> max around -40 instead of -340
+            reward -= 300.0 + 0.1 * impact_speed
             done = True
 
-        reward = max(-60.0, min(60.0, reward))         # safety net, rarely triggers now
         return reward, done
 
 def _normalize_angle(angle_deg: float) -> float:
