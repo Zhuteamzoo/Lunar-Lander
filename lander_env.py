@@ -7,6 +7,7 @@ from lunar_lander import (
     SCREEN_HEIGHT,
     INITIAL_FUEL,
     FPS,
+    SHIP_BOTTOM_LOCAL_Y
 )
 
 # ---- Action space -----------------------------------------------------
@@ -39,6 +40,16 @@ MAX_EPISODE_STEPS = 1000
 
 TRUNCATION_PENALTY = 60.0
 
+# --- safe-speed envelope + anti-hover ---
+TOUCHDOWN_SPEED = 35.0        # px/s we want at contact (hard limits: 70 vertical / 40 horizontal)
+BRAKE_ACCEL = 50.0            # px/s^2, conservative (true net braking is ~150)
+SPEED_ENVELOPE_WEIGHT = 0.6
+HOVER_RADIUS = 150.0          # px from pad center
+HOVER_STEP_PENALTY = 0.2      # per step while lingering near the pad
+PAD_CRASH_BASE = 120.0        # crash that touches the target pad ("almost landed")
+FAR_CRASH_BASE = 300.0        # crash anywhere else
+CRASH_SPEED_WEIGHT = 0.5
+
 # ---- State vector (10 elements, per your spec) --------------------------
 # 1. x of rocketship
 # 2. y of rocketship
@@ -62,6 +73,7 @@ class LanderEnv:
         self.steps_elapsed = 0
         self._prev_shaping = None
         self.target_points = target_points
+        self._pre_speed = 0.0
 
     # -- core Gym-like API -------------------------------------------------
 
@@ -73,6 +85,7 @@ class LanderEnv:
         self._hy = np.interp(self._hx, xs, ys)
         self.steps_elapsed = 0
         self._prev_shaping = self._compute_shaping()
+        self._pre_speed = 0.0
         return self._get_state()
 
     def _ground_y(self,x):
@@ -89,6 +102,9 @@ class LanderEnv:
     def step(self, action: int):
         thrust, rotate_left, rotate_right = _decode_action(action)
         fuel_before = self.game.rocket.fuel
+
+        r = self.game.rocket
+        self._pre_speed = math.hypot(r.vx, r.vy)
 
         self.game.update(self.dt, thrust, rotate_left, rotate_right)
         self.steps_elapsed += 1
@@ -149,26 +165,23 @@ class LanderEnv:
     # -- reward ------------------------------------------------------------
 
     def _compute_shaping(self) -> float:
-        """
-        Potential function: higher is better. Distance term always applies.
-        Speed term is scaled by proximity to the pad -- moving fast is fine
-        (even rewarded, via the distance term) while far away, and only
-        becomes costly as the rocket closes in, so the agent learns to
-        approach quickly and only decelerate near the pad, instead of
-        creeping the entire way there.
-        """
         rocket = self.game.rocket
         pad = self._get_target_pad()
         if pad is None:
             return 0.0
         pad_cx = (pad.x1 + pad.x2) / 2.0
-        dist_norm = math.hypot(pad_cx - rocket.x, pad.y - rocket.y) / MAX_DIAG_DIST
-        speed_norm = math.hypot(rocket.vx, rocket.vy) / MAX_SPEED
+        # Rocket centre sits SHIP_BOTTOM_LOCAL_Y above the pad when landed,
+        # so distance now actually reaches ~0 at touchdown.
+        target_y = pad.y - SHIP_BOTTOM_LOCAL_Y
+        dist_norm = math.hypot(pad_cx - rocket.x, target_y - rocket.y) / MAX_DIAG_DIST
 
-        proximity = 1.0 - dist_norm  # ~0 far from pad, ~1 right on top of it
-        speed_penalty_weight = 0.9 * max(0.0, (proximity - 0.7) / 0.3) ** 2 
+        # Speed only costs something when it exceeds what we could brake from
+        # at this height above the ground. Free when far up, strict near contact.
+        speed = math.hypot(rocket.vx, rocket.vy)
+        allowed = TOUCHDOWN_SPEED + math.sqrt(2.0 * BRAKE_ACCEL * self.game.altitude())
+        excess = max(0.0, speed - allowed) / MAX_SPEED
 
-        return -dist_norm - speed_penalty_weight * speed_norm
+        return -dist_norm - SPEED_ENVELOPE_WEIGHT * excess
 
     def _compute_reward(self, fuel_used: float) -> tuple[float, bool]:
         rocket = self.game.rocket
@@ -182,12 +195,21 @@ class LanderEnv:
         reward = shaping_reward + angle_penalty
         done = False
 
+        pad = self._get_target_pad()
+
+        # Anti-hover: lingering near the pad costs a little every step.
+        if pad is not None and rocket.state == "playing":
+            pad_cx = (pad.x1 + pad.x2) / 2.0
+            if math.hypot(pad_cx - rocket.x, pad.y - rocket.y) < HOVER_RADIUS:
+                reward -= HOVER_STEP_PENALTY
+
         if rocket.state == "landed":
             reward += 400.0 + rocket.landed_points * 3.0
             done = True
         elif rocket.state == "crashed":
-            impact_speed = math.hypot(rocket.vx, rocket.vy)
-            reward -= 300.0 + 0.1 * impact_speed
+            on_pad = pad is not None and pad.x1 <= rocket.x <= pad.x2
+            base = PAD_CRASH_BASE if on_pad else FAR_CRASH_BASE
+            reward -= base + CRASH_SPEED_WEIGHT * self._pre_speed
             done = True
 
         return reward, done
@@ -195,5 +217,5 @@ class LanderEnv:
 def _normalize_angle(angle_deg: float) -> float:
     a = angle_deg % 360.0
     if a > 180.0:
-        a -= 360.0
+        a -= 360.0 
     return a
