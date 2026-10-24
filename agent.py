@@ -33,17 +33,17 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from lander_env import LanderEnv, STATE_SIZE, NUM_ACTIONS, MAX_EPISODE_STEPS
+from lander_env import LanderEnv, STATE_SIZE, NUM_ACTIONS, MAX_EPISODE_STEPS, REWARD_SCALE
 from dashboard import TrainingDashboard
 
 # ---------------------------------
 # Hyperparameters
 
 GAMMA = 0.99
-LEARNING_RATE = 0.001
+LEARNING_RATE = 0.0003
 EPSILON_START = 1.0
 EPSILON_MIN = 0.05
-EPSILON_DECAY = 0.995
+EPSILON_DECAY = 0.998
 BUFFER_SIZE = 100_000
 BATCH_SIZE = 200
 NUM_EPISODES = 1500
@@ -125,6 +125,7 @@ class DQNAgent:
         self.loss_fn = nn.SmoothL1Loss()
 
         self.train_step_count = 0
+        self.last_mean_q = None   # mean Q(s,a) of the last training batch (for the dashboard)
 
     def act(self, state, greedy: bool = False) -> int:
         if not greedy and random.random() < self.epsilon:
@@ -176,10 +177,17 @@ class DQNAgent:
         n_transitions = 0
         skipped = 0
         loaded = 0
+        rescaled = 0
         for episode_transitions in episodes:
             if not episode_transitions or len(episode_transitions[0][0]) != self.state_dim:
                 skipped += 1
                 continue
+            # Demos recorded before REWARD_SCALE existed hold raw rewards (landing ~ +430).
+            # Scaled rewards never get anywhere near 50, so that's a reliable tell.
+            if max(abs(t[2]) for t in episode_transitions) > 50.0:
+                episode_transitions = [(s, a, r * REWARD_SCALE, ns, d)
+                                       for (s, a, r, ns, d) in episode_transitions]
+                rescaled += 1
             loaded += 1
             self.remember_success(episode_transitions)
             if also_into_main_buffer:
@@ -187,6 +195,8 @@ class DQNAgent:
                     self.memory.append(t)
             n_transitions += len(episode_transitions)
 
+        if rescaled:
+            print(f"Rescaled {rescaled} old demo(s) by REWARD_SCALE={REWARD_SCALE}")
         if skipped:
             print(f"Skipped {skipped} demo(s) with a different state size -- re-record them.")
 
@@ -226,6 +236,7 @@ class DQNAgent:
         dones = torch.tensor(dones, dtype=torch.float32, device=self.device).unsqueeze(1)
 
         q_values = self.policy_net(states).gather(1, actions)
+        self.last_mean_q = q_values.mean().item()
 
         with torch.no_grad():
             next_actions = self.policy_net(next_states).argmax(dim=1, keepdim=True)
@@ -276,6 +287,8 @@ def train():
         steps = 0
         info = {}
         episode_transitions = []
+        ep_losses = []      # loss from every gradient step this episode
+        ep_qs = []          # mean Q of every training batch this episode
 
         while not done and steps < MAX_STEPS:
             action = agent.act(state)
@@ -292,12 +305,22 @@ def train():
             agent.on_env_step()
 
             if steps % TRAIN_EVERY == 0:
-                agent.replay()
+                loss = agent.replay()
+                if loss is not None:
+                    ep_losses.append(loss)
+                    ep_qs.append(agent.last_mean_q)
 
         agent.decay_epsilon()
 
+        avg_loss = float(np.mean(ep_losses)) if ep_losses else None
+        avg_q = float(np.mean(ep_qs)) if ep_qs else None
+
         result = info.get("state", "playing")
-        if result == "landed":
+        on_target = (result == "landed"
+                     and env.game.rocket.landed_points == env.target_points)
+        if result == "landed" and not on_target:
+            result = "landed_wrong_pad"
+        if on_target:
             agent.remember_success(episode_transitions)
             if first_landing_episode is None:
                 first_landing_episode = episode
@@ -305,8 +328,12 @@ def train():
 
         print(f"Episode {episode + 1:4d} | reward: {total_reward:8.2f} | "
               f"epsilon: {agent.epsilon:.3f} | steps: {steps} | "
-              f"result: {result}")
-        dashboard.update(episode + 1, total_reward, result, agent.epsilon, steps)
+              f"result: {result} | "
+              f"loss: {avg_loss if avg_loss is not None else float('nan'):.4f}")
+        dashboard.update(episode + 1, total_reward,
+                         "crashed" if result == "landed_wrong_pad" else result,
+                         agent.epsilon, steps,
+                         loss=avg_loss, mean_q=avg_q)
 
         if (episode + 1) % EVAL_EVERY == 0:
             eval_rewards, eval_landings = evaluate(agent, env)
@@ -325,6 +352,7 @@ def train():
                 agent.save(f"dqn_weights_phase{CURRICULUM[phase]}.pth")
                 phase += 1
                 env.target_points = CURRICULUM[phase]
+                agent.success_memory.clear()   # old landings were for a different target pad
                 best_eval_score = (-1.0, -float("inf"))   # new target, new yardstick
                 agent.epsilon = max(agent.epsilon, PHASE_EPSILON_BUMP)
                 print(f"*** Curriculum phase {phase + 1}/{len(CURRICULUM)}: "

@@ -40,6 +40,16 @@ MAX_EPISODE_STEPS = 1000
 
 TRUNCATION_PENALTY = 60.0
 
+# Landing on the WRONG pad (not the current target) is not a success: it gets no
+# landing bonus and a penalty, so the agent can't "escape" the episode that way.
+WRONG_PAD_PENALTY = 100.0
+
+# Every reward returned by step() is multiplied by this. Raw rewards are in the
+# hundreds, which makes Huber loss behave like L1 and destabilises Q-learning;
+# scaled, a landing is ~ +4 to +7 and a crash ~ -1.5 to -4.
+# NOTE: demos recorded before this change hold raw rewards; agent.py rescales them on load.
+REWARD_SCALE = 0.01
+
 # --- safe-speed envelope + anti-hover ---
 TOUCHDOWN_SPEED = 35.0        # px/s we want at contact (hard limits: 70 vertical / 40 horizontal)
 BRAKE_ACCEL = 50.0            # px/s^2, conservative (true net braking is ~150)
@@ -115,6 +125,8 @@ class LanderEnv:
         truncated = self.steps_elapsed >= MAX_EPISODE_STEPS
         if truncated and not done:
             reward -= TRUNCATION_PENALTY
+
+        reward *= REWARD_SCALE
 
         info = {
             "state": self.game.rocket.state,
@@ -204,7 +216,10 @@ class LanderEnv:
                 reward -= HOVER_STEP_PENALTY
 
         if rocket.state == "landed":
-            reward += 400.0 + rocket.landed_points * 3.0
+            if rocket.landed_points == self.target_points:
+                reward += 400.0 + rocket.landed_points * 3.0
+            else:
+                reward -= WRONG_PAD_PENALTY   # landed, but on the wrong pad
             done = True
         elif rocket.state == "crashed":
             on_pad = pad is not None and pad.x1 <= rocket.x <= pad.x2

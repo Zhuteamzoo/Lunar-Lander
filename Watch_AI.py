@@ -16,8 +16,7 @@ from lunar_lander import SCREEN_WIDTH, SCREEN_HEIGHT, WHITE, BLACK, FPS
 from lander_env import LanderEnv, STATE_SIZE, NUM_ACTIONS
 from agent import DQNAgent
 
-WEIGHTS_PATH = "dqn_weights_final.pth"
-
+WEIGHTS_PATH = "dqn_weights_best_phase10.pth"
 
 def main():
     pygame.init()
